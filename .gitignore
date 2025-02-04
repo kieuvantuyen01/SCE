@@ -1,0 +1,6 @@
+.venv
+.DS_Store
+out/*
+console.log
+.vscode/settings.json
+__pycache__
