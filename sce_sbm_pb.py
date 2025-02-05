@@ -20,14 +20,20 @@ class SocialGolferSBM:
         self.encoding_type = encoding_type
         self.time_limit = 600  # 600 seconds = 10 minutes
         
-        # Khởi tạo CNF formula và các biến thống kê
-        self.cnf = CNF()
+        # Khởi tạo solver ngay từ đầu
+        if self.solver_name == "glucose3":
+            self.solver = Glucose3()
+        else:
+            self.solver = Minisat22()
+        
+        # Khởi tạo các biến thống kê
         self.num_vars = 0
         self.num_clauses = 0
         self.encoding_time = 0
         self.solving_time = 0
         
-        # Khởi tạo mapping biến
+        # Tạo biến cho mỗi player trong mỗi group mỗi tuần
+        # Với SBM, chúng ta sẽ sử dụng G'[i,j] thay vì G[i,j]
         self.var_mapping = {}
         self.reverse_mapping = {}
         self.next_var = 1
@@ -60,43 +66,21 @@ class SocialGolferSBM:
                     self.num_vars += 1
 
     def _add_clause(self, clause: List[int]):
-        """Helper function để thêm mệnh đề và đếm"""
-        self.cnf.append(clause)
+        """Helper function để thêm mệnh đề trực tiếp vào solver"""
+        self.solver.add_clause(clause)
         self.num_clauses += 1
-
-    def _add_cardinality_constraint(self, literals: List[int], k: int):
-        """
-        Thêm ràng buộc cardinality sử dụng PBLib: đúng k biến trong literals phải True
-        """
-        cnf = PBEnc.equals(lits=literals, bound=k, encoding=EncType.seqcounter, top_id=self.next_var)
-        
-        # Cập nhật next_var để tránh xung đột với các biến phụ được tạo bởi PBLib
-        if len(cnf.clauses) > 0:
-            max_var = max(abs(lit) for clause in cnf.clauses for lit in clause)
-            self.next_var = max_var + 1
-        
-        # Thêm tất cả các mệnh đề vào formula chính và đếm
-        for clause in cnf.clauses:
-            self._add_clause(clause)
 
     def encode(self):
         """Mã hóa bài toán với đo thời gian"""
         start_time = time.time()
         
-        # Constraint (8): Cố định tuần đầu tiên
+        # Thêm từng ràng buộc, mỗi ràng buộc sẽ thêm các mệnh đề trực tiếp vào solver
         self._encode_first_week()
-        
-        # Constraints (9)-(11): p players per group every weeks
         self._encode_players_per_group()
-        
-        # Constraint (12): Every golfer plays every week (except first p players)
         self._encode_every_player_plays()
-        
-        # Constraints (13)-(16): No repeat pairs with modified model
         self._encode_no_repeat_pairs()
         
         self.encoding_time = time.time() - start_time
-        return self.cnf
 
     def _encode_first_week(self):
         # Constraint (8): Cố định tuần đầu tiên
@@ -131,7 +115,7 @@ class SocialGolferSBM:
                     if (week, group, player) in self.var_mapping:
                         clause.append(self.var_mapping[(week, group, player)])
                 self._add_clause(clause)
-
+        
     def _encode_no_repeat_pairs(self):
         # Constraint (13): Giữa các nhóm có index ≤ p
         for w1, w2 in itertools.combinations(range(1, self.w), 2):
@@ -155,58 +139,64 @@ class SocialGolferSBM:
                                            -self.var_mapping[(w2, g2, p1)],
                                            -self.var_mapping[(w2, g2, p2)]])
 
-    def solve(self):
-        """Giải bài toán với timeout"""
-        # Chọn solver
-        if self.solver_name == "glucose3":
-            solver = Glucose3(use_timer=True)
-        else:
-            solver = Minisat22()
+    # def _encode_no_repeat_pairs(self):
+    #     """Mã hoá ràng buộc không có cặp người chơi nào gặp nhau 2 lần"""
+    #     if self.w == 1: return
         
-        solver.append_formula(self.cnf)
+    #     # Biến phụ tmp[w] = 1 nếu player i và j gặp nhau ở tuần w
+    #     tmp = [0 for _ in range(self.w + 1)]  # Thêm 1 phần tử để index từ 1
         
-        # Tạo timer để handle timeout
-        timer = Timer(self.time_limit - self.encoding_time, lambda s: s.interrupt(), [solver])
-        timer.start()
-        
-        try:
-            start_time = time.time()
-            if solver.solve():
-                self.solving_time = time.time() - start_time
-                model = solver.get_model()
-                solution = self._decode_solution(model)
-                
-                # Validate solution
-                if not self.validate_solution(solution):
-                    print("Invalid solution found. Terminating...")
-                    sys.exit(1)
-                
-                return "SAT", solution
-            else:
-                self.solving_time = time.time() - start_time
-                return "UNSAT", None
-                
-        except Exception as e:
-            self.solving_time = self.time_limit - self.encoding_time
-            return "timeout", None
+    #     def at_most_one_meeting(p1: int, p2: int):
+    #         """Đảm bảo 2 người chơi p1, p2 gặp nhau nhiều nhất 1 lần"""
+    #         # Tạo biến phụ cho mỗi tuần
+    #         for w in range(1, self.w):
+    #             self.next_var += 1
+    #             self.num_vars += 1  # Đếm biến phụ
+    #             tmp[w] = self.next_var
+    #         self.next_var += 1
+    #         self.num_vars += 1
+    #         tmp[self.w] = self.next_var
             
-        finally:
-            timer.cancel()
-            solver.delete()
-
-    def get_statistics(self) -> dict:
-        """Trả về thống kê của lần chạy"""
-        total_time = self.encoding_time + self.solving_time
+    #         # Mã hoá: tmp[w] = 1 nếu p1, p2 gặp nhau ở tuần w
+    #         for w in range(self.w):
+    #             for g in range(self.g):
+    #                 if (w, g, p1) in self.var_mapping and (w, g, p2) in self.var_mapping:
+    #                     # Nếu cả 2 cùng trong nhóm g tuần w -> tmp[w+1] = 1
+    #                     self._add_clause([-self.var_mapping[(w, g, p1)], 
+    #                                 -self.var_mapping[(w, g, p2)], 
+    #                                 tmp[w+1]])
+    #                     # Nếu 1 người trong nhóm g tuần w -> tmp[w+1] = 0
+    #                     self._add_clause([-self.var_mapping[(w, g, p1)],
+    #                                 self.var_mapping[(w, g, p2)],
+    #                                 -tmp[w+1]])
+            
+    #         # Mã hoá: tmp[w1] và tmp[w2] không thể cùng = 1
+    #         for w1 in range(1, self.w + 1):
+    #             for w2 in range(w1 + 1, self.w + 1):
+    #                 self._add_clause([-tmp[w1], -tmp[w2]])
         
-        return {
-            "Problem": f"{self.g}-{self.p}-{self.w}",
-            "Type": self.encoding_type,
-            "Solver": self.solver_name,
-            "Variables": self.num_vars,
-            "Clauses": self.num_clauses,
-            "Time": total_time if total_time < self.time_limit else self.time_limit,
-            "Result": "timeout" if total_time >= self.time_limit else "running"  # sẽ được cập nhật sau
-        }
+    #     # Áp dụng cho mọi cặp người chơi
+    #     for p1 in range(self.q):
+    #         for p2 in range(p1 + 1, self.q):
+    #             at_most_one_meeting(p1, p2)
+
+    def _add_cardinality_constraint(self, literals: List[int], k: int):
+        """
+        Thêm ràng buộc cardinality sử dụng PBLib: đúng k biến trong literals phải True
+        """
+        # Sử dụng PBLib để tạo mệnh đề CNF cho ràng buộc exactly-k
+        # top_id là ID lớn nhất hiện tại để tránh xung đột biến phụ
+        cnf = PBEnc.equals(lits=literals, bound=k, encoding=EncType.seqcounter, top_id=self.next_var)
+        
+        # Cập nhật next_var để tránh xung đột với các biến phụ được tạo bởi PBLib
+        if len(cnf.clauses) > 0:
+            max_var = max(abs(lit) for clause in cnf.clauses for lit in clause)
+            self.num_vars += max_var - self.num_vars + 1
+            self.next_var = max_var + 1
+        
+        # Thêm tất cả các mệnh đề vào formula chính
+        for clause in cnf.clauses:
+            self._add_clause(clause)
 
     def validate_solution(self, schedule: List[List[Set[int]]]) -> bool:
         """
@@ -249,18 +239,25 @@ class SocialGolferSBM:
                                 print(f"ERROR: Week {week+1}, group {group} must have exactly {self.p} players")
                                 return False
 
-            # Constraint (12): Mỗi người chơi (trừ p người đầu) phải chơi mỗi tuần
-            for week in range(1, self.w):
+            # Constraint (12): Mỗi người chơi phải chơi mỗi tuần (trừ p người đầu với tuần > 1)
+            for week in range(self.w):
                 players_this_week = set()
                 for group in range(self.g):
                     players_this_week.update(schedule[week][group])
-                for player in range(self.p, self.q):
-                    if player not in players_this_week:
-                        print(f"ERROR: Week {week+1}, player {player} must play")
+                
+                if week == 0:
+                    # Tuần đầu: tất cả người chơi phải tham gia
+                    if players_this_week != set(range(self.q)):
+                        print(f"ERROR: Week 1, all players must play")
+                        return False
+                else:
+                    # Các tuần sau: tất cả người chơi từ p trở đi phải tham gia
+                    if not players_this_week.issuperset(set(range(self.p, self.q))):
+                        print(f"ERROR: Week {week+1}, all players from {self.p} to {self.q-1} must play")
                         return False
 
             # Constraints (13)-(16): Không có cặp người chơi nào gặp nhau 2 lần
-            player_pairs = set()  # (player1, player2) for player1 < player2
+            player_pairs = set()  # (player1, player2, week) for player1 < player2
             for week in range(self.w):
                 for group in range(self.g):
                     players = sorted(list(schedule[week][group]))
@@ -277,6 +274,50 @@ class SocialGolferSBM:
         except Exception as e:
             print(f"ERROR: Exception during validation: {str(e)}")
             return False
+
+    def solve(self):
+        """Giải bài toán với timeout"""
+        # Tạo timer để handle timeout
+        timer = Timer(self.time_limit - self.encoding_time, lambda s: s.interrupt(), [self.solver])
+        timer.start()
+        
+        try:
+            start_time = time.time()
+            if self.solver.solve():
+                self.solving_time = time.time() - start_time
+                model = self.solver.get_model()
+                solution = self._decode_solution(model)
+                
+                # Validate solution
+                if not self.validate_solution(solution):
+                    print("Invalid solution found. Terminating...")
+                    sys.exit(1)
+                
+                return "SAT", solution
+            else:
+                self.solving_time = time.time() - start_time
+                return "UNSAT", None
+                
+        except Exception as e:
+            self.solving_time = self.time_limit - self.encoding_time
+            return "timeout", None
+            
+        finally:
+            timer.cancel()
+
+    def get_statistics(self) -> dict:
+        """Trả về thống kê của lần chạy"""
+        total_time = self.encoding_time + self.solving_time
+        
+        return {
+            "Problem": f"{self.g}-{self.p}-{self.w}",
+            "Type": self.encoding_type,
+            "Solver": self.solver_name,
+            "Variables": self.num_vars,
+            "Clauses": self.num_clauses,
+            "Time": total_time if total_time < self.time_limit else self.time_limit,
+            "Result": "timeout" if total_time >= self.time_limit else "running"  # sẽ được cập nhật sau
+        }
 
     def _decode_solution(self, model: List[int]) -> List[List[Set[int]]]:
         """
@@ -360,12 +401,12 @@ def run_from_input_file(input_file: str = "data.txt"):
                         results.append(stats)
                         
                         # In kết quả nếu tìm được
-                        if solution:
-                            print("\nFound solution:")
-                            for week in range(len(solution)):
-                                print(f"Week {week + 1}:")
-                                for group in range(len(solution[week])):
-                                    print(f"  Group {group + 1}: {solution[week][group]}")
+                        # if solution:
+                        #     print("\nFound solution:")
+                        #     for week in range(len(solution)):
+                        #         print(f"Week {week + 1}:")
+                        #         for group in range(len(solution[week])):
+                        #             print(f"  Group {group + 1}: {solution[week][group]}")
                         
                         # Ghi kết quả ra file sau mỗi lần chạy
                         write_results_to_csv(results)

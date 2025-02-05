@@ -1,6 +1,6 @@
 .venv
 .DS_Store
-out/*
+output/*
 console.log
 .vscode/settings.json
 __pycache__

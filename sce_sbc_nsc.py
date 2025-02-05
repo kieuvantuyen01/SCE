@@ -120,6 +120,7 @@ class SocialGolferProblem:
             for j in range(1, min(i, k) + 1):
                 map_register[i][j] = self.next_var
                 self.next_var += 1
+                self.num_vars += 1
 
         # (1): If a bit is true, the first bit of the corresponding register is true
         for i in range(1, n):

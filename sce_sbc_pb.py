@@ -118,6 +118,7 @@ class SocialGolferProblem:
         # Cập nhật next_var để tránh xung đột với các biến phụ được tạo bởi PBLib
         if len(cnf.clauses) > 0:
             max_var = max(abs(lit) for clause in cnf.clauses for lit in clause)
+            self.num_vars += max_var - self.num_vars + 1
             self.next_var = max_var + 1
         
         # Thêm tất cả các mệnh đề vào formula chính

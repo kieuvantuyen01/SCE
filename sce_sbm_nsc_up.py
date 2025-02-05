@@ -1,6 +1,6 @@
 from typing import List, Set
 import itertools
-from pysat.solvers import Minisat22, Glucose3
+from pysat.solvers import Minisat22, Glucose3, Solver
 from pysat.formula import CNF
 from pysat.pb import *
 import sys
@@ -11,7 +11,7 @@ from threading import Timer
 import time
 
 class SocialGolferSBM:
-    def __init__(self, groups: int, players_per_group: int, weeks: int, solver_name: str = "glucose3", encoding_type: str = "sce_sbm_nsc"):
+    def __init__(self, groups: int, players_per_group: int, weeks: int, solver_name: str = "glucose3", encoding_type: str = "sce_sbm_nsc_up"):
         self.g = groups  # số nhóm mỗi tuần
         self.p = players_per_group  # số người chơi mỗi nhóm  
         self.w = weeks  # số tuần
@@ -19,6 +19,8 @@ class SocialGolferSBM:
         self.solver_name = solver_name
         self.encoding_type = encoding_type
         self.time_limit = 600  # 600 seconds = 10 minutes
+
+        self.cnf = CNF()
         
         # Khởi tạo solver ngay từ đầu
         if self.solver_name == "glucose3":
@@ -67,7 +69,8 @@ class SocialGolferSBM:
 
     def _add_clause(self, clause: List[int]):
         """Helper function để thêm mệnh đề trực tiếp vào solver"""
-        self.solver.add_clause(clause)
+        # self.solver.add_clause(clause)
+        self.cnf.append(clause)
         self.num_clauses += 1
 
     def encode(self):
@@ -234,125 +237,104 @@ class SocialGolferSBM:
 
     def validate_solution(self, schedule: List[List[Set[int]]]) -> bool:
         """
-        Kiểm tra tính hợp lệ của lời giải theo các ràng buộc của SCE^SBM
-        Args:
-            schedule: Lịch chơi golf [week][group] = set of players
-        Returns:
-            bool: True nếu lời giải hợp lệ, False nếu không
+        Kiểm tra tính hợp lệ của lời giải sau khi đã qua post-processing
         """
-        try:
-            # Constraint (8): Kiểm tra tuần đầu tiên đã được cố định đúng
-            for player in range(self.q):
-                group = player // self.p
-                if player not in schedule[0][group]:
-                    print(f"ERROR: Week 1, player {player} must be in group {group}")
-                    return False
-
-            # Constraints (9)-(11): Kiểm tra số người chơi trong mỗi nhóm
-            for week in range(self.w):
-                for group in range(self.g):
-                    if week == 0:
-                        # Tuần đầu: mỗi nhóm có đúng p người
-                        if len(schedule[week][group]) != self.p:
-                            print(f"ERROR: Week 1, group {group} must have exactly {self.p} players")
-                            return False
-                    else:
-                        # Các tuần sau:
-                        if group < self.p:
-                            # Nhóm ≤ p: có p người (p-1 người + 1 người cố định)
-                            if len(schedule[week][group]) != self.p:
-                                print(f"ERROR: Week {week+1}, group {group} must have exactly {self.p} players")
-                                return False
-                            # Kiểm tra người cố định
-                            if group not in schedule[week][group]:
-                                print(f"ERROR: Week {week+1}, player {group} must be fixed in group {group}")
-                                return False
-                        else:
-                            # Nhóm > p: có p người
-                            if len(schedule[week][group]) != self.p:
-                                print(f"ERROR: Week {week+1}, group {group} must have exactly {self.p} players")
-                                return False
-
-            # Constraint (12): Mỗi người chơi phải chơi mỗi tuần (trừ p người đầu với tuần > 1)
-            for week in range(self.w):
-                players_this_week = set()
-                for group in range(self.g):
-                    players_this_week.update(schedule[week][group])
-                
-                if week == 0:
-                    # Tuần đầu: tất cả người chơi phải tham gia
-                    if players_this_week != set(range(self.q)):
-                        print(f"ERROR: Week 1, all players must play")
-                        return False
-                else:
-                    # Các tuần sau: tất cả người chơi từ p trở đi phải tham gia
-                    if not players_this_week.issuperset(set(range(self.p, self.q))):
-                        print(f"ERROR: Week {week+1}, all players from {self.p} to {self.q-1} must play")
-                        return False
-
-            # Constraints (13)-(16): Không có cặp người chơi nào gặp nhau 2 lần
-            player_pairs = set()  # (player1, player2, week) for player1 < player2
-            for week in range(self.w):
-                for group in range(self.g):
-                    players = sorted(list(schedule[week][group]))
-                    for i in range(len(players)):
-                        for j in range(i + 1, len(players)):
-                            pair = (players[i], players[j])
-                            if pair in player_pairs:
-                                print(f"ERROR: Players {pair} meet more than once")
-                                return False
-                            player_pairs.add(pair)
-
-            return True
-
-        except Exception as e:
-            print(f"ERROR: Exception during validation: {str(e)}")
+        if not schedule:
             return False
+        
+        # Kiểm tra số tuần
+        if len(schedule) != self.w:
+            return False
+        
+        # Với mỗi tuần
+        for week in range(self.w):
+            # Kiểm tra số nhóm
+            if len(schedule[week]) != self.g:
+                return False
+            
+            # Kiểm tra kích thước mỗi nhóm
+            for group in schedule[week]:
+                if len(group) != self.p:
+                    return False
+                
+            # Kiểm tra mỗi người chơi chỉ xuất hiện 1 lần/tuần
+            players_this_week = set()
+            for group in schedule[week]:
+                if len(group.intersection(players_this_week)) > 0:
+                    return False
+                players_this_week.update(group)
+        
+        # Kiểm tra điều kiện social
+        for w1 in range(self.w):
+            for w2 in range(w1 + 1, self.w):
+                for g1 in range(self.g):
+                    for g2 in range(self.g):
+                        # Kiểm tra không có 2 người chơi nào gặp nhau > 1 lần
+                        common_players = schedule[w1][g1].intersection(schedule[w2][g2])
+                        if len(common_players) > 1:
+                            return False
+        
+        return True
 
     def solve(self):
-        """Giải bài toán với timeout và unit propagation post-treatment"""
+        """Giải bài toán với unit propagation và timeout"""
         try:
             start_time = time.time()
-            
-            # Tính thời gian còn lại cho phép
             remaining_time = self.time_limit - self.encoding_time
             if remaining_time <= 0:
                 return "timeout", None
-            
-            # Tạo timer để interrupt solver
-            timer = Timer(remaining_time, lambda s: s.interrupt(), [self.solver])
+
+            # Tạo solver mới với các mệnh đề ban đầu
+            if self.solver_name == "glucose3":
+                solver = Glucose3(bootstrap_with=self.cnf.clauses)
+            else:
+                solver = Minisat22(bootstrap_with=self.cnf.clauses)
+
+            # Tạo timer để handle timeout
+            timer = Timer(remaining_time, lambda s: s.interrupt(), [solver])
             timer.start()
-            
+
             try:
-                # Giải với expect_interrupt=True
-                status = self.solver.solve_limited(expect_interrupt=True)                
-                if status is False:  # Solver xác định được UNSAT
+                # Thực hiện unit propagation
+                status, propagated_lits = solver.propagate(assumptions=[])
+                if not status:
+                    print("Unsatisfiable after unit propagation")
+                    self.solving_time = time.time() - start_time
                     return "UNSAT", None
-                
-                model = self.solver.get_model()
-                if model is None:  # Solver chưa tìm được lời giải trong thời gian cho phép
-                    self.solving_time = remaining_time
-                    return "timeout", None
-                
-                # Tìm được lời giải SAT
-                solution = self._decode_solution(model)
-                
-                if not self.validate_solution(solution):
-                    print("Invalid solution found. Terminating...")
-                    return "INVALID", None
-                
-                self.solving_time = time.time() - start_time
-                return "SAT", solution
-                
+
+                # Thêm các unit clauses từ kết quả propagation
+                for lit in propagated_lits:
+                    solver.add_clause([lit])
+
+                # Giải bài toán sau khi đã propagate
+                if solver.solve_limited(expect_interrupt=True):
+                    model = solver.get_model()
+                    if model is None:
+                        self.solving_time = remaining_time
+                        return "timeout", None
+
+                    # Giải mã và kiểm tra lời giải
+                    solution = self._decode_solution(model)
+                    if not self.validate_solution(solution):
+                        print("Invalid solution found. Terminating...")
+                        return "INVALID", None
+
+                    self.solving_time = time.time() - start_time
+                    return "SAT", solution
+                else:
+                    self.solving_time = time.time() - start_time
+                    return "UNSAT", None
+
             except Exception as e:
                 print(f"Error during solving: {str(e)}")
                 return "timeout", None
-            
+
             finally:
                 timer.cancel()
-            
+                solver.delete()  # Giải phóng bộ nhớ
+
         except Exception as e:
-            print(f"Error during solving: {str(e)}")
+            print(f"Error during solver initialization: {str(e)}")
             return "timeout", None
 
     def get_statistics(self) -> dict:
@@ -372,18 +354,25 @@ class SocialGolferSBM:
     def _decode_solution(self, model: List[int]) -> List[List[Set[int]]]:
         """
         Chuyển đổi lời giải SAT thành lịch chơi golf
-        Với SB2: G[i,j] = G'[i,j] ∪ {pj} nếu j ≤ p và tuần > 1
+        Xử lý cả model gốc và model đã qua unit propagation
         """
         schedule = [[set() for _ in range(self.g)] for _ in range(self.w)]
         
+        # Xử lý tuần đầu tiên trước (cố định)
+        for player in range(self.q):
+            group = player // self.p
+            schedule[0][group].add(player)
+        
+        # Xử lý các tuần còn lại từ model đã được propagate
         for var in model:
             if var > 0 and var in self.reverse_mapping:
                 week, group, player = self.reverse_mapping[var]
-                schedule[week][group].add(player)
-                # Thêm người chơi cố định cho các nhóm có index <= p từ tuần thứ 2
-                if week > 0 and group < self.p:
-                    schedule[week][group].add(group)
-                
+                if week > 0:  # Chỉ xử lý từ tuần thứ 2
+                    schedule[week][group].add(player)
+                    # Thêm người chơi cố định cho các nhóm có index <= p
+                    if group < self.p:
+                        schedule[week][group].add(group)
+        
         return schedule
 
 def write_results_to_csv(results: List[dict], filename: str = "results.csv"):
@@ -416,7 +405,7 @@ def run_from_input_file(input_file: str = "data.txt"):
     """
     results = []
     solvers = ["glucose3"]  # Danh sách các solver cần test
-    encoding_types = ["sce_sbm_nsc"]  # Danh sách các encoding cần test
+    encoding_types = ["sce_sbm_nsc_up"]  # Danh sách các encoding cần test
     
     try:
         with open(input_file, 'r') as f:
