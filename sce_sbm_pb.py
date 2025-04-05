@@ -11,24 +11,21 @@ from threading import Timer
 import time
 
 class SocialGolferSBM:
-    def __init__(self, groups: int, players_per_group: int, weeks: int, solver_name: str = "glucose3", encoding_type: str = "sce_sbm_pb"):
+    def __init__(self, groups: int, players_per_group: int, weeks: int, solver_name: str = "kissat4", encoding_type: str = "sce_sbm_pb"):
         self.g = groups  # số nhóm mỗi tuần
         self.p = players_per_group  # số người chơi mỗi nhóm  
         self.w = weeks  # số tuần
         self.q = groups * players_per_group  # tổng số người chơi
         self.solver_name = solver_name
         self.encoding_type = encoding_type
-        self.time_limit = 600  # 600 seconds = 10 minutes
+        self.time_limit = 900  # 600 seconds = 10 minutes
         
-        # Khởi tạo solver ngay từ đầu
-        if self.solver_name == "glucose3":
-            self.solver = Glucose3()
-        else:
-            self.solver = Minisat22()
-        
+        self.cnf = CNF()
         # Khởi tạo các biến thống kê
         self.num_vars = 0
         self.num_clauses = 0
+        self.num_long_clauses = 0
+        self.num_short_clauses = 0
         self.encoding_time = 0
         self.solving_time = 0
         
@@ -67,12 +64,15 @@ class SocialGolferSBM:
 
     def _add_clause(self, clause: List[int]):
         """Helper function để thêm mệnh đề trực tiếp vào solver"""
-        self.solver.add_clause(clause)
+        # self.cnf.append(clause)
+        if len(clause) < 3:
+            self.num_short_clauses += 1
+        else:
+            self.num_long_clauses += 1
         self.num_clauses += 1
 
     def encode(self):
         """Mã hóa bài toán với đo thời gian"""
-        start_time = time.time()
         
         # Thêm từng ràng buộc, mỗi ràng buộc sẽ thêm các mệnh đề trực tiếp vào solver
         self._encode_first_week()
@@ -80,7 +80,7 @@ class SocialGolferSBM:
         self._encode_every_player_plays()
         self._encode_no_repeat_pairs()
         
-        self.encoding_time = time.time() - start_time
+        return self.cnf
 
     def _encode_first_week(self):
         # Constraint (8): Cố định tuần đầu tiên
@@ -94,7 +94,7 @@ class SocialGolferSBM:
         # Constraint (10): Các nhóm có index <= p trong các tuần > 1 có p-1 người chơi
         # (vì đã có 1 người cố định)
         for week in range(1, self.w):
-            for group in range(self.p):
+            for group in range(min(self.p, self.g)):
                 players = [self.var_mapping[(week, group, player)] 
                           for player in range(self.p, self.q)]
                 self._add_cardinality_constraint(players, self.p-1)
@@ -276,45 +276,148 @@ class SocialGolferSBM:
             return False
 
     def solve(self):
-        """Giải bài toán với timeout"""
-        # Tạo timer để handle timeout
-        timer = Timer(self.time_limit - self.encoding_time, lambda s: s.interrupt(), [self.solver])
-        timer.start()
+        """Giải bài toán và trả về kết quả"""
+        if self.solver_name == "glucose3":
+            return self.run_glucose()
+        elif self.solver_name == "kissat4":
+            return self.run_kissat()
+        else:
+            print(f"Error: Unknown solver '{self.solver_name}'")
+            sys.exit(1)
+
+    def run_glucose(self):
+        # """Giải bài toán với timeout"""
+        # solver = Glucose3(use_timer=True)
         
-        try:
-            start_time = time.time()
-            if self.solver.solve():
-                self.solving_time = time.time() - start_time
-                model = self.solver.get_model()
-                solution = self._decode_solution(model)
+        # solver.append_formula(self.cnf)
+        
+        # # Tạo timer để handle timeout
+        # timer = Timer(self.time_limit, lambda s: s.interrupt(), [solver])
+        # timer.start()
+        
+        # try:
+        #     start_time = time.time()
+        #     status = solver.solve_limited(expect_interrupt = True)
+        #     if status == True:
+        #         model = solver.get_model()
+
+        #         if model is None:
+        #             print("Time limit exceeded.")
+        #             return "timeout", None
                 
-                # Validate solution
-                if not self.validate_solution(solution):
-                    print("Invalid solution found. Terminating...")
-                    sys.exit(1)
+        #         self.solving_time = time.time() - start_time
+        #         solution = self._decode_solution(model)
                 
-                return "SAT", solution
-            else:
-                self.solving_time = time.time() - start_time
-                return "UNSAT", None
+        #         # Validate solution
+        #         if not self.validate_solution(solution):
+        #             print("Invalid solution found. Terminating...")
+        #             sys.exit(1)
                 
-        except Exception as e:
-            self.solving_time = self.time_limit - self.encoding_time
-            return "timeout", None
+        #         return "SAT", solution
+        #     else:
+        #         self.solving_time = time.time() - start_time
+        #         return "UNSAT", None
+                
+        # except Exception as e:
+        #     self.solving_time = self.time_limit
+        #     return "timeout", None
             
-        finally:
-            timer.cancel()
+        # finally:
+        #     timer.cancel()
+        #     solver.delete()
+        return "", None
+
+    def run_kissat(self):
+        # Store the number of variables and clauses before solving the problem
+        num_vars = self.num_vars
+        num_clauses = self.num_clauses
+        problem_name = f"{self.g}-{self.p}-{self.w}"
+
+        def write_to_cnf():
+            # Write data to the file
+            with open(input_file, 'w') as writer:
+                # Write a line of information about the number of variables and constraints
+                writer.write(f"p cnf {num_vars} {num_clauses}\n")
+
+                # Write each clause to the file
+                for clause in self.cnf.clauses:
+                    for literal in clause: writer.write(str(literal) + " ")
+                    writer.write("0\n")
+            
+            self.cnf.clauses.clear()
+            print(f"CNF written to {os.path.abspath(input_file)}.\n")
+
+        def handle_file():
+            result_text = "timeout"
+            time_run = self.time_limit
+            solution = None  # Initialize solution as None
+
+            try:
+                with open(output_file, 'r') as file:
+                    lines = file.readlines()
+                    for line in lines:
+                        if line.strip() == "s SATISFIABLE":
+                            result_text = "sat"
+                        elif line.strip() == "s UNSATISFIABLE":
+                            result_text = "unsat"
+                        elif result_text == "sat" and line.strip().startswith("v"):
+                            solution = list(map(int, line.strip().split()[1:]))
+                        elif result_text != "timeout" and line.strip().startswith("c process-time:"):
+                            tmp = line.split()
+                            time_run = float(tmp[len(tmp) - 2])
+                            self.solving_time = time_run
+                            break
+
+                if result_text == "timeout":
+                    print(f"Time limit exceeded ({self.time_limit}s).\n")
+                    return "timeout", None
+                elif result_text == "sat":
+                    print(f"A solution was found in {time_run}s.")
+                    if solution:
+                        solution.pop()  # Remove the last 0 from the solution
+                        model = self._decode_solution(solution)
+                        # if not self.validate_solution(model):
+                        #     print("Invalid solution found. Terminating...")
+                        #     sys.exit(1)
+                        return "SAT", model
+                else:
+                    print(f"UNSAT. Time run: {time_run}s.\n") 
+                    return "UNSAT", None
+
+            except Exception as e:
+                print(f"Error reading output file: {str(e)}")
+                return "timeout", None
+
+        # Create the directory if it doesn't exist
+        input_path = "all_kissat/input_cnf"
+        if not os.path.exists(input_path): os.makedirs(input_path)
+
+        # Create the directory if it doesn't exist
+        output_path = "all_kissat/output_txt"
+        if not os.path.exists(output_path): os.makedirs(output_path)
+
+        input_file = os.path.join(input_path, problem_name + ".cnf")
+        output_file = os.path.join(output_path, problem_name + ".txt")
+        write_to_cnf()
+
+        print("Searching for a solution...")
+        bashCommand = f"ls {input_file} | xargs -n 1 ./all_kissat/kissat --time={self.time_limit} --relaxed > {output_file}"
+        os.system(bashCommand)
+
+        return handle_file()
 
     def get_statistics(self) -> dict:
         """Trả về thống kê của lần chạy"""
-        total_time = self.encoding_time + self.solving_time
+        total_time = self.solving_time
         
         return {
             "Problem": f"{self.g}-{self.p}-{self.w}",
             "Type": self.encoding_type,
             "Solver": self.solver_name,
             "Variables": self.num_vars,
-            "Clauses": self.num_clauses,
+            # "Clauses": self.num_clauses,
+            "Long_clauses": self.num_long_clauses,
+            "Short_clauses": self.num_short_clauses,
             "Time": total_time if total_time < self.time_limit else self.time_limit,
             "Result": "timeout" if total_time >= self.time_limit else "running"  # sẽ được cập nhật sau
         }
@@ -322,32 +425,45 @@ class SocialGolferSBM:
     def _decode_solution(self, model: List[int]) -> List[List[Set[int]]]:
         """
         Chuyển đổi lời giải SAT thành lịch chơi golf
-        Với SB2: G[i,j] = G'[i,j] ∪ {pj} nếu j ≤ p và tuần > 1
+        - Tuần đầu: mỗi người chơi i phải ở nhóm i//p
+        - Các tuần sau: mỗi nhóm g < p phải có người chơi g cố định
         """
         schedule = [[set() for _ in range(self.g)] for _ in range(self.w)]
         
+        # Xử lý tuần đầu tiên - gán mỗi người chơi i vào nhóm i//p
+        for player in range(self.q):
+            group = player // self.p
+            schedule[0][group].add(player)
+        
+        # Xử lý các tuần sau dựa trên model SAT
         for var in model:
             if var > 0 and var in self.reverse_mapping:
                 week, group, player = self.reverse_mapping[var]
-                schedule[week][group].add(player)
-                # Thêm người chơi cố định cho các nhóm có index <= p từ tuần thứ 2
-                if week > 0 and group < self.p:
-                    schedule[week][group].add(group)
-                
+                if week > 0:  # Chỉ xử lý các tuần sau tuần đầu
+                    schedule[week][group].add(player)
+                    if group < self.p:  # Với nhóm < p, thêm người chơi cố định
+                        schedule[week][group].add(group)
+        
+        # # Kiểm tra và đảm bảo mỗi nhóm có đúng p người chơi
+        # for week in range(self.w):
+        #     for group in range(self.g):
+        #         if len(schedule[week][group]) != self.p:
+        #             print(f"Warning: Week {week+1}, Group {group} has {len(schedule[week][group])} players")
+        
         return schedule
 
-def write_results_to_csv(results: List[dict], filename: str = "results.csv"):
+def write_results_to_csv(results: List[dict], filename: str = os.path.splitext(os.path.basename(__file__))[0]):
     """Ghi kết quả ra file CSV"""
     df = pd.DataFrame(results)
     
     # Tạo thư mục output nếu chưa tồn tại
-    output_dir = "output"
+    output_dir = "reports"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
     # Thêm ngày vào tên file
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    filepath = os.path.join(output_dir, f"{filename}_{date_str}.csv")
+    # date_str = datetime.now().strftime('%Y-%m-%d')
+    filepath = os.path.join(output_dir, f"{filename}.csv")
     
     # Ghi file
     if os.path.exists(filepath):

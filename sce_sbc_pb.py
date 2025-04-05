@@ -182,26 +182,38 @@ class SocialGolferProblem:
         except Exception as e:
             print(f"ERROR: Exception during validation: {str(e)}")
             return False
-
+        
     def solve(self):
-        """Giải bài toán với timeout"""
-        # Chọn solver
+        """Giải bài toán và trả về kết quả"""
         if self.solver_name == "glucose3":
-            solver = Glucose3(use_timer=True)
+            return self.run_glucose()
+        elif self.solver_name == "kissat":
+            return self.run_kissat()
         else:
-            solver = Minisat22()
+            print(f"Error: Unknown solver '{self.solver_name}'")
+            sys.exit(1)
+
+    def run_glucose(self):
+        """Giải bài toán với timeout"""
+        solver = Glucose3(use_timer=True)
         
         solver.append_formula(self.cnf)
         
         # Tạo timer để handle timeout
-        timer = Timer(self.time_limit - self.encoding_time, lambda s: s.interrupt(), [solver])
+        timer = Timer(self.time_limit, lambda s: s.interrupt(), [solver])
         timer.start()
         
         try:
             start_time = time.time()
-            if solver.solve():
-                self.solving_time = time.time() - start_time
+            status = solver.solve_limited(expect_interrupt = True)
+            if status == True:
                 model = solver.get_model()
+
+                if model is None:
+                    print("Time limit exceeded.")
+                    return "timeout", None
+                
+                self.solving_time = time.time() - start_time
                 solution = self._decode_solution(model)
                 
                 # Validate solution
@@ -215,12 +227,74 @@ class SocialGolferProblem:
                 return "UNSAT", None
                 
         except Exception as e:
-            self.solving_time = self.time_limit - self.encoding_time
+            self.solving_time = self.time_limit
             return "timeout", None
             
         finally:
             timer.cancel()
             solver.delete()
+
+    def run_kissat(self):
+        # Store the number of variables and clauses before solving the problem
+        num_vars = self.num_vars
+        num_clauses = self.num_clauses
+        problem_name = f"{self.g}-{self.p}-{self.w}"
+
+        def write_to_cnf():
+            # Write data to the file
+            with open(input_file, 'w') as writer:
+                # Write a line of information about the number of variables and constraints
+                writer.write(f"p cnf {num_vars} {num_clauses}\n")
+
+                # Write each clause to the file
+                for clause in self.cnf.clauses:
+                    for literal in clause: writer.write(str(literal) + " ")
+                    writer.write("0\n")
+            
+            self.cnf.clauses.clear()
+            print(f"CNF written to {os.path.abspath(input_file)}.\n")
+
+        def handle_file():
+            result_text = "timeout"
+            time_run = self.time_limit
+            solution = []
+
+            with open(output_file, 'r') as file: lines = file.readlines()
+            for line in lines:
+                if line.strip() == "s SATISFIABLE": result_text = "sat"
+                elif line.strip() == "s UNSATISFIABLE": result_text = "unsat"
+                elif result_text == "sat" and line.strip().startswith("v"):
+                    solution.extend(map(int, line.strip().split()[1:]))
+                elif result_text != "timeout" and line.strip().startswith("c process-time:"):
+                    tmp = line.split()
+                    time_run = float(tmp[len(tmp) - 2])
+                    break
+
+            if result_text == "timeout": print(f"Time limit exceeded ({self.time_limit}s).\n")
+            elif result_text == "sat":
+                print(f"A solution was found in {time_run}s.")
+                solution.pop()  # Remove the last 0 from the solution
+                model = self._decode_solution(solution)
+                if not self.validate_solution(solution): sys.exit(1)
+            else: print(f"UNSAT. Time run: {model}s.\n")
+        
+        # Create the directory if it doesn't exist
+        input_path = "all_kissat/input_cnf"
+        if not os.path.exists(input_path): os.makedirs(input_path)
+
+        # Create the directory if it doesn't exist
+        output_path = "all_kissat/output_txt"
+        if not os.path.exists(output_path): os.makedirs(output_path)
+
+        input_file = os.path.join(input_path, problem_name + ".cnf")
+        output_file = os.path.join(output_path, problem_name + ".txt")
+        write_to_cnf()
+
+        print("Searching for a solution...")
+        bashCommand = f"ls {input_file} | xargs -n 1 ./all_kissat/kissat --time={self.time_limit} --relaxed > {output_file}"
+        os.system(bashCommand)
+
+        handle_file()
 
     def get_statistics(self) -> dict:
         """Trả về thống kê của lần chạy"""
@@ -249,18 +323,18 @@ class SocialGolferProblem:
                     
         return schedule
 
-def write_results_to_csv(results: List[dict], filename: str = "results.csv"):
+def write_results_to_csv(results: List[dict], filename: str = os.path.splitext(os.path.basename(__file__))[0]):
     """Ghi kết quả ra file CSV"""
     df = pd.DataFrame(results)
     
     # Tạo thư mục output nếu chưa tồn tại
-    output_dir = "output"
+    output_dir = "reports"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
     # Thêm ngày vào tên file
-    date_str = datetime.now().strftime('%Y-%m-%d')
-    filepath = os.path.join(output_dir, f"{filename}_{date_str}.csv")
+    # date_str = datetime.now().strftime('%Y-%m-%d')
+    filepath = os.path.join(output_dir, f"{filename}.csv")
     
     # Ghi file
     if os.path.exists(filepath):
@@ -278,7 +352,7 @@ def run_from_input_file(input_file: str = "data.txt"):
     File format: mỗi dòng chứa 3 số nguyên: groups players_per_group weeks
     """
     results = []
-    solvers = ["glucose3"]  # Danh sách các solver cần test
+    solvers = ["glucose3", "kissat"]  # Danh sách các solver cần test
     encoding_types = ["sce_sbc_pb"]  # Danh sách các encoding cần test
     
     try:

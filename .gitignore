@@ -4,3 +4,9 @@ output/*
 console.log
 .vscode/settings.json
 __pycache__
+input_cnf/*
+all_kissat/*
+logs/*
+reports/*
+kissat
+sce_sbc_pb.py
